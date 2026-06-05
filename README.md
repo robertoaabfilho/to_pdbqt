@@ -1,516 +1,181 @@
-# Converter to PDBQT
+# convert_to_pdbqt
 
-Script em Python para converter arquivos moleculares nos formatos `.pdb`, `.sdf` e `.mol2` para `.pdbqt`, compatível com ferramentas de docking molecular como **PyRx**, **AutoDock Vina**, **GNINA** e **Smina**.
-
-O código diferencia automaticamente, ou por definição do usuário, entre:
-
-- **Ligantes**: convertidos com RDKit + Meeko;
-- **Receptores/proteínas**: convertidos com Open Babel.
-
----
-
-## Funcionalidades
-
-- Conversão de arquivos `.pdb`, `.sdf` e `.mol2` para `.pdbqt`;
-- Detecção automática de ligantes e receptores;
-- Conversão de ligantes usando **Meeko** e **RDKit**;
-- Conversão de receptores usando **Open Babel**;
-- Geração de arquivos compatíveis com PyRx e AutoDock Tools;
-- Recalcula cargas de Gasteiger para ligantes;
-- Atribui tipos atômicos no padrão AutoDock;
-- Permite conversão recursiva em subpastas;
-- Permite filtrar formatos específicos;
-- Evita reconverter arquivos já processados e atualizados.
+Converte arquivos de ligantes e receptores para o formato **PDBQT**, compatível com PyRx, AutoDock Vina, GNINA e Smina.
 
 ---
 
 ## Formatos suportados
 
-### Entrada
+| Entrada | Tipo | Backend |
+|---|---|---|
+| `.sdf` | Ligante | Meeko + RDKit |
+| `.mol2` | Ligante | Meeko + RDKit |
+| `.pdb` | Ligante ou Receptor | Meeko + RDKit / Open Babel |
+| `.cif` (mmCIF/PDBx) | Receptor | Open Babel direto ou gemmi + Open Babel |
 
-```text
-.pdb
-.sdf
-.mol2
-```
-
-### Saída
-
-```text
-.pdbqt
-```
+A detecção automática de tipo (ligante vs. receptor) é feita com base no conteúdo do arquivo. Arquivos `.cif` são sempre tratados como receptores.
 
 ---
 
-## Requisitos
+## Dependências
 
 ### Python
-
-Recomenda-se usar Python 3.8 ou superior.
-
-### Dependências Python
-
-Instale as dependências com:
-
-```bash
-pip install meeko rdkit
+```
+pip install meeko rdkit gemmi
 ```
 
-Caso esteja usando ambiente virtual:
+| Pacote | Para que serve |
+|---|---|
+| `rdkit` | Leitura de moléculas, cargas de Gasteiger, tipos de átomo AutoDock |
+| `meeko` | Preparação de ligantes (ligações rotacionáveis, formato ADT) |
+| `gemmi` | Fallback para conversão de receptores CIF quando o Open Babel falha |
 
+### Open Babel (externo, obrigatório para receptores)
+
+**Windows:** https://openbabel.org/wiki/Install — marcar "Add to PATH" durante a instalação
+
+**Linux:**
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install meeko rdkit
-```
-
-No Windows:
-
-```bash
-python -m venv venv
-venv\Scripts\activate
-pip install meeko rdkit
-```
-
----
-
-## Dependência externa: Open Babel
-
-O Open Babel é necessário para converter receptores/proteínas.
-
-### Linux/Ubuntu
-
-```bash
-sudo apt update
 sudo apt install openbabel
 ```
 
-### macOS
-
+**Mac:**
 ```bash
 brew install open-babel
 ```
 
-### Windows
+---
 
-Baixe e instale pelo site oficial:
+## Uso
 
-```text
-https://openbabel.org/wiki/Install
+```
+python convert_to_pdbqt.py <input> [output] [opções]
 ```
 
-Durante a instalação, marque a opção para adicionar o Open Babel ao `PATH`.
+### Argumentos posicionais
 
-Para testar se o Open Babel foi instalado corretamente:
+| Argumento | Descrição |
+|---|---|
+| `input` | Pasta com os arquivos a converter |
+| `output` | Pasta de saída (padrão: mesma pasta do input) |
 
-```bash
-obabel -V
-```
+### Opções
+
+| Opção | Valores | Padrão | Descrição |
+|---|---|---|---|
+| `--type` | `ligand`, `receptor`, `auto` | `auto` | Tipo de molécula. `auto` detecta pelo conteúdo |
+| `--formats` | `pdb sdf mol2 cif` | todos | Filtra quais extensões processar |
+| `--pH` | número | `7.4` | pH para protonação |
+| `--recursive` | — | desligado | Busca arquivos em subpastas |
+| `--verbose` | — | desligado | Exibe mensagens detalhadas de debug |
 
 ---
 
-## Estrutura esperada
-
-Você pode organizar os arquivos assim:
-
-```text
-projeto/
-│
-├── convert_to_pdbqt.py
-│
-├── ligands/
-│   ├── composto1.sdf
-│   ├── composto2.mol2
-│   └── composto3.pdb
-│
-└── proteins/
-    └── receptor.pdb
-```
-
----
-
-## Como usar
-
-### 1. Converter ligantes automaticamente
-
-Se a pasta contém apenas ligantes:
+## Exemplos
 
 ```bash
-python3 convert_to_pdbqt.py ./ligands
-```
-
-Ou, no Windows:
-
-```bash
+# Ligantes — detecção automática (SDF, MOL2, PDB)
 python convert_to_pdbqt.py ./ligands
-```
 
-Os arquivos `.pdbqt` serão salvos na mesma pasta de entrada.
+# Ligantes — forçar tipo e filtrar formato
+python convert_to_pdbqt.py ./ligands --type ligand --formats sdf mol2
 
----
+# Receptor PDB ou MOL2
+python convert_to_pdbqt.py ./proteins --type receptor
 
-### 2. Converter ligantes especificando o tipo
+# Receptor mmCIF/PDBx (ex: arquivo baixado do RCSB ou AlphaFold)
+python convert_to_pdbqt.py ./proteins --type receptor --formats cif
 
-```bash
-python3 convert_to_pdbqt.py ./ligands --type ligand
-```
+# Pasta de entrada e saída separadas
+python convert_to_pdbqt.py ./input ./output
 
----
+# Busca recursiva em subpastas
+python convert_to_pdbqt.py ./all --recursive
 
-### 3. Converter receptores/proteínas
-
-```bash
-python3 convert_to_pdbqt.py ./proteins --type receptor
-```
-
----
-
-### 4. Salvar os arquivos convertidos em outra pasta
-
-```bash
-python3 convert_to_pdbqt.py ./ligands ./output
-```
-
-Exemplo:
-
-```text
-Entrada: ./ligands
-Saída:   ./output
+# Modo verbose para depuração
+python convert_to_pdbqt.py ./proteins --type receptor --verbose
 ```
 
 ---
 
-### 5. Converter apenas arquivos SDF
+## Como funciona
 
-```bash
-python3 convert_to_pdbqt.py ./ligands --formats sdf
+### Ligantes (`.sdf`, `.mol2`, `.pdb`)
+
+1. **RDKit** lê o arquivo e adiciona hidrogênios explícitos com coordenadas 3D.
+2. **Meeko** identifica ligações rotacionáveis e prepara a topologia de torsões.
+3. **RDKit** recalcula as cargas parciais de Gasteiger.
+4. O PDBQT é escrito no formato ADT com tipos de átomo AutoDock corretos (`OA`, `NA`, `A`, `HD`, etc.) e registros `CONECT`.
+
+### Receptores `.pdb` / `.mol2`
+
+O **Open Babel** converte diretamente para PDBQT em modo rígido (`-xr`), adicionando apenas hidrogênios polares (`-xh`) e aplicando protonação pelo pH informado.
+
+### Receptores `.cif` (mmCIF/PDBx)
+
+Duas estratégias são tentadas em ordem:
+
+**1. Open Babel direto** *(preferencial)*
+O Open Babel suporta mmCIF nativamente desde a versão 2.4. Não gera arquivo intermediário.
 ```
+obabel -icif receptor.cif -opdbqt -O receptor.pdbqt -xr -xh --ph 7.4 -d
+```
+
+**2. gemmi + Open Babel** *(fallback automático)*
+Usado quando o Open Babel direto falha (versão antiga ou CIF não-padrão). O gemmi lê o mmCIF, remove os hidrogênios existentes, escreve um PDB intermediário limpo, e então o Open Babel converte esse PDB para PDBQT. O PDB intermediário é apagado ao final.
 
 ---
 
-### 6. Converter apenas arquivos SDF e MOL2
+## Comportamento do cache
 
-```bash
-python3 convert_to_pdbqt.py ./ligands --formats sdf mol2
-```
-
----
-
-### 7. Buscar arquivos também em subpastas
-
-```bash
-python3 convert_to_pdbqt.py ./molecules --recursive
-```
-
----
-
-### 8. Definir pH
-
-O pH padrão é 7.4, mas pode ser alterado:
-
-```bash
-python3 convert_to_pdbqt.py ./proteins --type receptor --pH 7.0
-```
-
----
-
-### 9. Modo detalhado
-
-```bash
-python3 convert_to_pdbqt.py ./ligands --verbose
-```
-
----
-
-## Exemplos práticos
-
-### Converter ligantes para docking no PyRx
-
-```bash
-python3 convert_to_pdbqt.py ./ligands --type ligand
-```
-
-### Converter receptor para AutoDock Vina
-
-```bash
-python3 convert_to_pdbqt.py ./protein --type receptor
-```
-
-### Converter todos os arquivos de uma pasta e subpastas
-
-```bash
-python3 convert_to_pdbqt.py ./input ./pdbqt_output --recursive
-```
-
-### Converter somente moléculas em SDF
-
-```bash
-python3 convert_to_pdbqt.py ./sdf_files ./converted --type ligand --formats sdf
-```
-
----
-
-## Como o script funciona
-
-### Para ligantes
-
-O script utiliza:
-
-- **RDKit** para leitura da molécula;
-- Adição explícita de hidrogênios;
-- Geração de conformação 3D, caso a molécula não tenha coordenadas;
-- Cálculo de cargas de Gasteiger;
-- **Meeko** para preparar informações relacionadas à flexibilidade e torções;
-- Pós-processamento para gerar um `.pdbqt` compatível com AutoDock Tools/PyRx.
-
-O arquivo final inclui:
-
-- Cabeçalho `REMARK`;
-- Coordenadas atômicas;
-- Cargas parciais;
-- Tipos atômicos AutoDock;
-- Registros `CONECT`.
-
----
-
-### Para receptores
-
-O script usa **Open Babel** para gerar o arquivo `.pdbqt`.
-
-A conversão é feita de modo rígido, adicionando hidrogênios polares e aplicando cargas de Gasteiger.
-
----
-
-## Detecção automática de ligante ou receptor
-
-Quando o parâmetro `--type` não é informado, o script usa o modo:
-
-```bash
---type auto
-```
-
-Nesse modo:
-
-- Arquivos `.sdf` e `.mol2` são tratados como ligantes;
-- Arquivos `.pdb` são analisados pelo conteúdo;
-- Se a maioria dos resíduos detectados for de aminoácidos, o arquivo é tratado como receptor;
-- Caso contrário, é tratado como ligante.
-
-Para evitar erros, recomenda-se usar explicitamente:
-
-```bash
---type ligand
-```
-
-ou
-
-```bash
---type receptor
-```
-
-quando você já souber o tipo da molécula.
+Arquivos já convertidos são ignorados (`[SKIP]`) se o `.pdbqt` existente for mais recente que o arquivo de entrada. Para forçar a reconversão, apague os `.pdbqt` existentes.
 
 ---
 
 ## Saída esperada
 
-Durante a execução, o script exibe mensagens como:
-
-```text
+```
 ========================================================
   Converter -> PDBQT  (PyRx / ADT compatible)
-  Mol. type : ligand
+  Mol. type : receptor
   pH        : 7.4
-  Input     : /caminho/ligands
-  Output    : /caminho/ligands
-  Files     : 3  .sdf: 3
+  Input     : C:\Bioinfo\proteins
+  Output    : C:\Bioinfo\proteins
+  Files     : 3  .cif: 2  .pdb: 1
 ========================================================
-
-  [OK] composto1.sdf -> composto1.pdbqt  [25 heavy atoms]
-  [OK] composto2.sdf -> composto2.pdbqt  [31 heavy atoms]
-
+  [CIF] 5HT1A.cif
+  [OK] 5HT1A.cif -> 5HT1A.pdbqt  [842 KB, rigid receptor, direct]
+  [CIF] 7E2X.cif
+  [OK] 7E2X.cif  -> 7E2X.pdbqt   [1204 KB, rigid receptor, direct]
+  [OK] protein.pdb -> protein.pdbqt  [310 KB, rigid receptor]
 ========================================================
-  Result: [OK] 2 converted
+  Result: [OK] 3 converted
 ========================================================
 ```
 
----
+Os prefixos de status são:
 
-## Arquivos já convertidos
-
-Se o arquivo `.pdbqt` já existir e for mais recente que o arquivo original, o script não converte novamente.
-
-Exemplo:
-
-```text
-[SKIP] composto1.sdf (already converted)
-```
-
-Isso evita processamento repetido desnecessário.
-
----
-
-## Possíveis erros e soluções
-
-### Erro: dependência Python ausente
-
-Mensagem possível:
-
-```text
-[FAIL] Missing dependency
-```
-
-Solução:
-
-```bash
-pip install meeko rdkit
-```
-
----
-
-### Erro: Open Babel não encontrado
-
-Mensagem possível:
-
-```text
-[FAIL] 'obabel' not found.
-```
-
-Solução no Ubuntu:
-
-```bash
-sudo apt install openbabel
-```
-
-Depois teste:
-
-```bash
-obabel -V
-```
-
----
-
-### Erro ao ler molécula
-
-Mensagem possível:
-
-```text
-[FAIL] Could not read: arquivo.sdf
-```
-
-Possíveis causas:
-
-- Arquivo corrompido;
-- Formato inválido;
-- Molécula sem estrutura química válida;
-- Problemas de sanitização pelo RDKit.
-
-Sugestão:
-
-- Verifique o arquivo original;
-- Teste abrir em Avogadro, PyMOL, Discovery Studio ou Open Babel;
-- Tente converter o arquivo para outro formato antes de rodar o script.
-
----
-
-### Erro de timeout
-
-Mensagem possível:
-
-```text
-[FAIL] Timeout processing receptor.pdb
-```
-
-O script possui limite de 300 segundos para conversão com Open Babel.
-
-Possíveis soluções:
-
-- Verificar se o receptor é muito grande;
-- Remover águas, ligantes e cadeias desnecessárias antes da conversão;
-- Separar cadeias proteicas;
-- Preparar o receptor previamente em outro software.
-
----
-
-## Recomendações antes do docking
-
-Antes de usar os arquivos `.pdbqt` em docking molecular, recomenda-se:
-
-### Para ligantes
-
-- Conferir se a estrutura 3D está correta;
-- Verificar protonação;
-- Verificar cargas;
-- Conferir se a molécula não possui fragmentos desconectados;
-- Confirmar se o arquivo `.pdbqt` abre corretamente no PyRx ou AutoDock Tools.
-
-### Para receptores
-
-- Remover moléculas de água, se necessário;
-- Remover ligantes cristalográficos, se não forem usados;
-- Corrigir resíduos ausentes;
-- Adicionar hidrogênios;
-- Conferir protonação em pH fisiológico;
-- Verificar se o receptor foi tratado como rígido.
-
----
-
-## Comando geral
-
-```bash
-python3 convert_to_pdbqt.py INPUT_FOLDER [OUTPUT_FOLDER] [opções]
-```
-
-### Argumentos principais
-
-| Argumento | Descrição |
+| Prefixo | Significado |
 |---|---|
-| `input` | Pasta contendo arquivos `.pdb`, `.sdf` ou `.mol2` |
-| `output` | Pasta de saída. Opcional. Se omitida, salva na pasta de entrada |
-| `--type` | Tipo molecular: `ligand`, `receptor` ou `auto` |
-| `--formats` | Formatos a converter: `pdb`, `sdf`, `mol2` |
-| `--pH` | pH usado na protonação. Padrão: `7.4` |
-| `--recursive` | Busca arquivos também em subpastas |
-| `--verbose` | Exibe mensagens mais detalhadas |
+| `[OK]` | Conversão bem-sucedida |
+| `[SKIP]` | Arquivo já convertido e atualizado |
+| `[FAIL]` | Erro na conversão |
+| `[CIF]` | Pipeline CIF iniciado |
 
 ---
 
-## Exemplo completo
+## Solução de problemas
 
+**`obabel` não encontrado**
+Verifique se o Open Babel está instalado e no PATH. No Windows, certifique-se de marcar "Add to PATH" durante a instalação ou adicionar manualmente `C:\Program Files\OpenBabel-X.X.X` ao PATH do sistema.
+
+**`[FAIL] No atomic sites found in CIF`**
+O arquivo CIF pode estar corrompido ou ser um CIF de pequena molécula sem coordenadas fracionárias. Tente abrir o arquivo no Mercury ou VESTA para verificar a integridade. Use `--verbose` para ver a mensagem de erro detalhada do gemmi.
+
+**Ligante sem conformação 3D**
+O RDKit tenta gerar coordenadas 3D automaticamente via ETKDGv3. Se falhar, a molécula pode ter problemas de valência. Verifique o arquivo de entrada no RDKit ou no Avogadro.
+
+**Erros de dependência Python**
 ```bash
-python3 convert_to_pdbqt.py ./input_molecules ./output_pdbqt --type ligand --formats sdf mol2 --recursive --pH 7.4
+pip install --upgrade meeko rdkit gemmi
 ```
-
-Esse comando:
-
-- Lê arquivos da pasta `input_molecules`;
-- Procura também em subpastas;
-- Converte apenas `.sdf` e `.mol2`;
-- Trata todos os arquivos como ligantes;
-- Salva os `.pdbqt` em `output_pdbqt`;
-- Usa pH 7.4.
-
----
-
-## Aplicação
-
-Este script é útil para preparar arquivos de entrada para estudos de docking molecular em:
-
-- PyRx;
-- AutoDock Vina;
-- AutoDock Tools;
-- GNINA;
-- Smina;
-- pipelines automatizados de triagem virtual.
-
----
-
-## Observação importante
-
-Embora o script automatize a conversão para `.pdbqt`, a preparação molecular para docking pode exigir curadoria manual, especialmente para receptores proteicos. Sempre valide visualmente os arquivos finais antes de iniciar o docking.
-
----
-
-## Autor
-
-Script para conversão automatizada de estruturas moleculares para `.pdbqt`, com foco em compatibilidade com PyRx, AutoDock Tools e ferramentas relacionadas de docking molecular.
