@@ -2,14 +2,15 @@
 """
 Converter to PDBQT - PyRx / AutoDock Tools compatible
 ======================================================
-Supported input formats: .pdb, .sdf, .mol2
+Supported input formats: .pdb, .sdf, .mol2, .cif (mmCIF/PDBx)
 Output: .pdbqt files compatible with PyRx, AutoDock Vina, GNINA, Smina
 
 Ligands  -> Meeko + RDKit  (produces ADT-compatible format)
 Receptors -> Open Babel    (rigid, polar H only)
+CIF receptors -> gemmi (CIF -> PDB) + Open Babel (PDB -> PDBQT)
 
 Dependencies:
-    pip install meeko rdkit
+    pip install meeko rdkit gemmi
 
     Open Babel (for receptors):
       Windows: https://openbabel.org/wiki/Install  (check "Add to PATH")
@@ -23,6 +24,9 @@ Usage:
 
     # Receptor/protein
     python3 convert_to_pdbqt.py ./proteins --type receptor
+
+    # CIF receptor (mmCIF/PDBx format)
+    python3 convert_to_pdbqt.py ./proteins --type receptor --formats cif
 
     # Filter by format
     python3 convert_to_pdbqt.py ./ligands --formats sdf mol2
@@ -40,12 +44,13 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
 
-SUPPORTED_FORMATS = {".pdb", ".sdf", ".mol2"}
+SUPPORTED_FORMATS = {".pdb", ".sdf", ".mol2", ".cif"}
 
 OBABEL_FORMAT = {
     ".pdb":  "pdb",
     ".sdf":  "sdf",
     ".mol2": "mol2",
+    ".cif":  "cif",
 }
 
 # Amino acids for auto-detection of receptors
@@ -107,6 +112,9 @@ def detect_molecule_type(filepath):
     """Returns 'receptor' or 'ligand' based on residue content."""
     if filepath.suffix.lower() in (".sdf", ".mol2"):
         return "ligand"
+    # CIF files are almost always macromolecular receptors (PDB/AlphaFold)
+    if filepath.suffix.lower() == ".cif":
+        return "receptor"
     aa_count = 0
     total = 0
     try:
@@ -324,6 +332,188 @@ def convert_receptor_obabel(filepath, output_folder, pH=7.4):
         return False
 
 
+
+# ============================================================
+#  RECEPTOR CIF: mmCIF/PDBx -> PDBQT
+# ============================================================
+#
+#  Strategy (in order of preference):
+#
+#  1. obabel direct  : obabel -icif -> -opdbqt
+#     Open Babel supports mmCIF natively (format "cif") since v2.4.
+#     This is the fastest and most reliable path for PDB/AlphaFold files.
+#
+#  2. gemmi + obabel : CIF -> intermediate PDB -> PDBQT
+#     Used when obabel fails (e.g. old obabel builds, non-standard mmCIF).
+#     gemmi reads the mmCIF, writes a clean PDB, then obabel converts.
+#
+#  3. Error          : both paths failed.
+
+def _obabel_cif_direct(cif_path, output_file, pH=7.4):
+    """
+    Try to convert CIF -> PDBQT using Open Babel's native mmCIF reader.
+    Returns True on success, False on failure (caller should try fallback).
+    """
+    command = [
+        "obabel",
+        "-icif", str(cif_path),
+        "-opdbqt",
+        "-O", str(output_file),
+        "--partialcharge", "gasteiger",
+        "-xr",          # rigid receptor
+        "-xh",          # add polar H only
+        "--ph", str(pH),
+        "-d",           # delete non-polar H first
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
+            return True
+        log.debug("    obabel direct failed (rc=%d): %s",
+                  result.returncode, (result.stderr or result.stdout).strip()[:200])
+        return False
+    except FileNotFoundError:
+        raise   # let caller handle missing obabel
+    except Exception as e:
+        log.debug("    obabel direct exception: %s", e)
+        return False
+
+
+def _cif_to_pdb_gemmi(cif_path, pdb_path):
+    """
+    Convert mmCIF/PDBx -> PDB using gemmi (fallback pre-processor).
+
+    Handles macromolecular mmCIF (PDB/AlphaFold) and small-molecule CIF
+    (COD/CSD). Strips existing H so Open Babel re-adds them correctly.
+    Returns True on success, False on error.
+    """
+    try:
+        import gemmi
+    except ImportError:
+        log.error("  [FAIL] 'gemmi' not installed (needed as fallback).")
+        log.error("         Run: pip install gemmi")
+        return False
+
+    # --- macromolecular path (most common for receptors) ---
+    try:
+        structure = gemmi.read_structure(str(cif_path))
+
+        n_atoms = sum(
+            len(res)
+            for model in structure
+            for chain in model
+            for res in chain
+        )
+        if n_atoms == 0:
+            raise ValueError("No atoms found via read_structure")
+
+        structure.remove_hydrogens()
+
+        options = gemmi.PdbWriteOptions()
+        options.numbered_ter = True
+        options.ter_ignores_missing_atoms = True
+        structure.write_pdb(str(pdb_path), options)
+
+        log.debug("    gemmi (macro) wrote PDB: %s  [%d atoms]",
+                  pdb_path.name, n_atoms)
+        return True
+
+    except Exception as macro_err:
+        log.debug("    gemmi macro path failed: %s", macro_err)
+
+    # --- small-molecule CIF fallback (COD/CSD style) ---
+    try:
+        import gemmi
+
+        doc   = gemmi.cif.read(str(cif_path))
+        block = doc.sole_block()
+        small = gemmi.make_small_structure_from_block(block)
+
+        if len(small.sites) == 0:
+            log.error("  [FAIL] gemmi found no atoms in CIF: %s", cif_path.name)
+            return False
+
+        pdb_lines = ["REMARK   CIF converted by gemmi (small-molecule path)"]
+        serial = 1
+        for site in small.sites:
+            elem = site.element.name if site.element != gemmi.Element("X") else "C"
+            frac = gemmi.Fractional(site.fract.x, site.fract.y, site.fract.z)
+            pos  = small.cell.orthogonalize(frac)
+            name = (site.label or elem)[:4].ljust(4)
+            pdb_lines.append(
+                "HETATM%5d %-4s LIG     1    %8.3f%8.3f%8.3f"
+                "  1.00  0.00          %2s  "
+                % (serial, name, pos.x, pos.y, pos.z, elem)
+            )
+            serial += 1
+
+        pdb_lines.append("END")
+        pdb_path.write_text("\n".join(pdb_lines) + "\n", encoding="utf-8")
+        log.debug("    gemmi (small-mol) wrote PDB: %s", pdb_path.name)
+        return True
+
+    except Exception as small_err:
+        log.error("  [FAIL] gemmi could not parse CIF '%s': %s",
+                  cif_path.name, small_err)
+        return False
+
+
+def convert_receptor_cif(cif_path, output_folder, pH=7.4):
+    """
+    Convert mmCIF/PDBx receptor to PDBQT.
+
+    Tries two strategies:
+      1. obabel direct  (CIF -> PDBQT, no intermediate file)
+      2. gemmi + obabel (CIF -> PDB -> PDBQT, intermediate PDB deleted after)
+
+    Raises SystemExit only for a missing obabel installation.
+    """
+    output_file = output_folder / (cif_path.stem + ".pdbqt")
+    log.info("  [CIF] %s", cif_path.name)
+
+    # ── Strategy 1: obabel direct ──────────────────────────────────────────
+    try:
+        if _obabel_cif_direct(cif_path, output_file, pH):
+            size_kb = output_file.stat().st_size // 1024
+            log.info("  [OK] %s -> %s  [%d KB, rigid receptor, direct]",
+                     cif_path.name, output_file.name, size_kb)
+            return True
+        log.debug("    obabel direct did not produce output; trying gemmi fallback")
+    except FileNotFoundError:
+        log.error("  [FAIL] 'obabel' not found.")
+        log.error("     Windows: https://openbabel.org/wiki/Install")
+        log.error("     Linux:   sudo apt install openbabel")
+        log.error("     Mac:     brew install open-babel")
+        return False
+
+    # ── Strategy 2: gemmi -> PDB -> obabel ────────────────────────────────
+    log.debug("    falling back to gemmi + obabel pipeline")
+    tmp_pdb = output_folder / (cif_path.stem + "__tmp_cif.pdb")
+
+    try:
+        if not _cif_to_pdb_gemmi(cif_path, tmp_pdb):
+            return False
+
+        if not tmp_pdb.exists() or tmp_pdb.stat().st_size == 0:
+            log.error("  [FAIL] gemmi produced an empty PDB for %s", cif_path.name)
+            return False
+
+        ok = convert_receptor_obabel(tmp_pdb, output_folder, pH)
+
+        # obabel names output after tmp_pdb stem; rename to final name
+        obabel_out = output_folder / tmp_pdb.with_suffix(".pdbqt").name
+        if ok and obabel_out.exists() and obabel_out != output_file:
+            obabel_out.replace(output_file)
+            size_kb = output_file.stat().st_size // 1024
+            log.info("  [OK] %s -> %s  [%d KB, rigid receptor, gemmi+obabel]",
+                     cif_path.name, output_file.name, size_kb)
+        return ok
+
+    finally:
+        if tmp_pdb.exists():
+            tmp_pdb.unlink()
+
+
 # ============================================================
 #  File collection and folder processing
 # ============================================================
@@ -398,7 +588,10 @@ def convert_folder(
             detected = mol_type
 
         if detected == "receptor":
-            ok = convert_receptor_obabel(f, output_path, pH)
+            if f.suffix.lower() == ".cif":
+                ok = convert_receptor_cif(f, output_path, pH)
+            else:
+                ok = convert_receptor_obabel(f, output_path, pH)
         else:
             ok = convert_ligand_meeko(f, output_path, pH)
 
@@ -434,8 +627,11 @@ Examples:
   python convert_to_pdbqt.py C:/Bioinfo/ligands
   python convert_to_pdbqt.py C:/Bioinfo/ligands --type ligand --formats sdf
 
-  # Receptor/protein (Open Babel)
+  # Receptor/protein PDB/MOL2 (Open Babel)
   python convert_to_pdbqt.py C:/Bioinfo/proteins --type receptor
+
+  # Receptor mmCIF/PDBx (gemmi + Open Babel)
+  python convert_to_pdbqt.py C:/Bioinfo/proteins --type receptor --formats cif
 
   # Auto-detect type, separate output folder
   python convert_to_pdbqt.py C:/Bioinfo/input C:/Bioinfo/output
@@ -457,10 +653,10 @@ Examples:
                              "  receptor -> protein, Open Babel\n"
                              "  auto     -> detect automatically")
     parser.add_argument("--formats", nargs="+",
-                        choices=["pdb", "sdf", "mol2"],
+                        choices=["pdb", "sdf", "mol2", "cif"],
                         default=None,
                         help="Formats to convert (default: all)\n"
-                             "Example: --formats sdf mol2")
+                             "Example: --formats sdf mol2 cif")
     parser.add_argument("--pH", type=float, default=7.4,
                         help="pH for protonation (default: 7.4)")
     parser.add_argument("--recursive", action="store_true",
